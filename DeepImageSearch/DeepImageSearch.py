@@ -145,22 +145,36 @@ class Search_Setup:
         faiss.write_index(index, config.image_features_vectors_idx(self.model_name))
         print("\033[94m Saved The Indexed File:" + f"[metadata-files/{self.model_name}/image_features_vectors.idx]")
 
-    def run_index(self):
+    def run_index(self, force_reextract: str = None):
         """
         Indexes the images in the image_list and creates an index file for fast similarity search.
+
+        Parameters:
+        -----------
+        force_reextract : str, optional
+            If set to 'yes', forces feature extraction and indexing again.
+            If set to 'no', skips extraction and loads existing metadata/index.
+            If None, asks the user via input().
         """
-        if len(os.listdir(f'metadata-files/{self.model_name}')) == 0:
+        metadata_dir = f'metadata-files/{self.model_name}'
+
+        if not os.path.exists(metadata_dir) or len(os.listdir(metadata_dir)) == 0:
             data = self._start_feature_extraction()
             self._start_indexing(data)
         else:
-            print("\033[91m Metadata and Features are already present, Do you want Extract Again? Enter yes or no")
-            flag = str(input())
-            if flag.lower() == 'yes':
+            if force_reextract is None:
+                print("\033[91m Metadata and Features are already present, Do you want Extract Again? Enter yes or no")
+                flag = input().strip().lower()
+            else:
+                flag = force_reextract.strip().lower()
+
+            if flag == 'yes':
                 data = self._start_feature_extraction()
                 self._start_indexing(data)
             else:
                 print("\033[93m Meta data already Present, Please Apply Search!")
-                print(os.listdir(f'metadata-files/{self.model_name}'))
+                print(os.listdir(metadata_dir))
+
         self.image_data = pd.read_pickle(config.image_data_with_features_pkl(self.model_name))
         self.f = len(self.image_data['features'][0])
 
