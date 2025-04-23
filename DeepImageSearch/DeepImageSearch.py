@@ -1,3 +1,4 @@
+import shutil
 import DeepImageSearch.config as config
 import os
 import pandas as pd
@@ -221,6 +222,191 @@ class Search_Setup:
         D, I = index.search(np.array([self.v], dtype=np.float32), self.n)
         return dict(zip(I[0], self.image_data.iloc[I[0]]['images_paths'].to_list()))
 
+    # def _search_by_vector_curator(self, v, threshold: float = 0.4):
+    #     """
+    #     Searches for the most similar vector using FAISS.
+    #     Returns True if the top match's distance >= threshold, else False.
+    #     """
+    #     self.v = v
+    #     self.n = n
+    #     index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
+    #     D, I = index.search(np.array([self.v], dtype=np.float32), self.n) 
+
+    #     top_distance = D[0][0]
+    #     return top_distance >= threshold       
+    # def _search_by_vector_curator(self, v, threshold: float = 0.4):
+    #     """
+    #     Searches the entire index dynamically and returns the most similar image info.
+    #     If no image is similar enough (distance < threshold), returns None.
+    #     """
+    #     # Load the index
+    #     index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
+
+    #     # Get total number of vectors in the index
+    #     total_vectors = index.ntotal
+    #     if total_vectors == 0:
+    #         print("[WARNING] FAISS index is empty.")
+    #         return None
+
+    #     # Search across all vectors
+    #     D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
+
+    #     # Find best match (lowest distance)
+    #     top_distance = D[0][0]
+    #     top_index = I[0][0]
+
+    #     print(f"[INFO] Top FAISS distance: {top_distance}")
+    #     print(f"[INFO] Top FAISS index: {top_index}")
+
+    #     if top_distance >= threshold:
+    #         return {
+    #             "index": top_index,
+    #             "distance": top_distance
+    #         }
+    #     else:
+    #         return None  # Handle moving the image elsewhere outside this function
+
+    # def get_similar_images_curator(self, image_path: str, threshold: float = 0.7):
+    #     """
+    #     Consistent threshold across the functions.
+    #     """
+    #     temp_folder = "/media/shubham/ssd_hub1/neha_work/visual_env/env/DeepImageSearch/temp"
+    #     image_name = os.path.basename(image_path)
+    #     print(f"\nChecking image: {image_name}")
+
+    #     # Step 1: Extract the vector
+    #     print("Extracting feature vector...")
+    #     query_vector = self._get_query_vector(image_path)
+
+    #     # Step 2: Search using FAISS
+    #     print("Searching in FAISS index...")
+    #     result = self._search_by_vector_curator(query_vector, threshold)  # Use the same threshold here
+
+    #     if result is None:
+    #         print("No match found in FAISS index. Skipping similarity check.")
+    #         return False
+
+    #     distance = result['distance']
+    #     print(f"Similarity distance from closest match: {distance:.4f}")
+
+    #     # Step 3: Compare and act
+    #     if distance < threshold:
+    #         print(f"Distance below threshold ({threshold}) → Not similar.")
+    #         os.makedirs(temp_folder, exist_ok=True)
+    #         target_path = os.path.join(temp_folder, image_name)
+    #         shutil.move(image_path, target_path)
+    #         print(f"Image moved to TEMP folder: {temp_folder}")
+    #         return False
+    #     else:
+    #         print(f"Distance meets threshold ({threshold}) → Image is similar. No move needed.")
+    #         return True
+
+    # def _search_by_vector_curator(self, v, threshold: float = 0.7):
+    #     """
+    #     Search and log distances for images using the given threshold.
+    #     """
+    #     index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
+    #     total_vectors = index.ntotal
+    #     if total_vectors == 0:
+    #         print("[WARNING] FAISS index is empty.")
+    #         return None
+
+    #     D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
+
+    #     top_distance = D[0][0]
+    #     top_index = I[0][0]
+
+    #     print(f"[INFO] Top FAISS distance: {top_distance}")
+    #     print(f"[INFO] Top FAISS index: {top_index}")
+    #     print(f"[INFO] Distances for all images in the index: {D[0]}")  # Log all distances for comparison
+
+    #     if top_distance < threshold:  # Consistent threshold logic
+    #         return {
+    #             "index": top_index,
+    #             "distance": top_distance
+    #         }
+    #     else:
+    #         return None  # Not similar enough
+
+    def get_similar_images_curator(self, image_path: str, threshold: float = 0.7):
+        """
+        Consistent threshold across the functions.
+        """
+        temp_folder = "/media/shubham/ssd_hub1/neha_work/visual_env/env/DeepImageSearch/temp"
+        image_name = os.path.basename(image_path)
+        print(f"\nChecking image: {image_name}")
+
+        # Step 1: Extract the vector
+        print("Extracting feature vector...")
+        query_vector = self._get_query_vector(image_path)
+
+        # Step 2: Search using FAISS
+        print("Searching in FAISS index...")
+        result = self._search_by_vector_curator(query_vector, threshold)  # Use the same threshold here
+
+        if result is None:
+            print("No match found in FAISS index. Skipping similarity check.")
+            return False
+
+        distance = result['distance']
+        print(f"Similarity distance from closest match: {distance:.4f}")
+
+        # Step 3: Compare and act
+        if distance > threshold:
+            print(f"Distance below threshold ({threshold}) → Not similar.")
+            os.makedirs(temp_folder, exist_ok=True)
+            target_path = os.path.join(temp_folder, image_name)
+            shutil.move(image_path, target_path)
+
+            # Print the image moved to the temp folder along with its distance
+            print(f"Image moved to TEMP folder: {target_path}")
+            print(f"Distance of the image: {distance:.4f}")
+            
+            # Optionally, display the image (this part is optional and requires the PIL library)
+            try:
+                image = Image.open(target_path)
+                image.show(title=f"Moved Image: {image_name} | Distance: {distance:.4f}")
+            except Exception as e:
+                print(f"Could not open the image: {e}")
+
+            return False
+        else:
+            print(f"Distance meets threshold ({threshold}) → Image is similar. No move needed.")
+            return True
+
+    def _search_by_vector_curator(self, v, threshold: float = 0.7):
+        """
+        Search and log distances for images using the given threshold.
+        """
+        index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
+        total_vectors = index.ntotal
+        if total_vectors == 0:
+            print("[WARNING] FAISS index is empty.")
+            return None
+
+        D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
+
+        print(f"Total images to classify: {len(D[0])}")  # Log the number of images
+        print(f"Distances for all images in the index:")
+
+        for idx, dist in enumerate(D[0]):
+            if dist >= threshold:
+                print(f"Distance for image {I[0][idx]}: {dist:.4f} → Not similar")  # Indicate not similar
+
+        top_distance = D[0][0]
+        top_index = I[0][0]
+
+        print(f"[INFO] Top FAISS distance: {top_distance}")
+        print(f"[INFO] Top FAISS index: {top_index}")
+
+        if top_distance < threshold:  # Consistent threshold logic
+            return {
+                "index": top_index,
+                "distance": top_distance
+            }
+        else:
+            return None  # Not similar enough
+        
     def _get_query_vector(self, image_path: str):
         self.image_path = image_path
         img = Image.open(self.image_path)
@@ -247,7 +433,7 @@ class Search_Setup:
         plt.show()
 
         query_vector = self._get_query_vector(image_path)
-        img_list = list(self._search_by_vector(query_vector, number_of_images).values())
+        img_list = list(self._search_by_vector_curator(query_vector, number_of_images).values())
 
         grid_size = math.ceil(math.sqrt(number_of_images))
         axes = []
@@ -277,8 +463,75 @@ class Search_Setup:
         self.image_path = image_path
         self.number_of_images = number_of_images
         query_vector = self._get_query_vector(self.image_path)
-        img_dict = self._search_by_vector(query_vector, self.number_of_images)
+        img_dict = self._search_by_vector_curator(query_vector, self.number_of_images)
         return img_dict
+    
+    # def get_similar_images_curator(self, image_path: str, threshold: float = 0.7):
+    #     """
+    #     Verbose version: Check image similarity and log steps clearly.
+    #     If FAISS distance is >= threshold → image is similar → keep it.
+    #     If FAISS distance is < threshold → image is not similar → move it to 'temp' folder.
+    #     """
+    #     import os, shutil
+    #     temp_folder = "/media/shubham/ssd_hub1/neha_work/visual_env/env/DeepImageSearch/temp"
+
+    #     image_name = os.path.basename(image_path)
+    #     print(f"\Checking image: {image_name}")
+
+    #     # Step 1: Extract the vector
+    #     print("Extracting feature vector...")
+    #     query_vector = self._get_query_vector(image_path)
+
+    #     # Step 2: Search using FAISS
+    #     print("Searching in FAISS index...")
+    #     result = self._search_by_vector_curator(query_vector, threshold=0.0)  # get raw result always
+
+    #     if result is None:
+    #         print("No match found in FAISS index. Skipping similarity check.")
+    #         return False
+
+    #     distance = result['distance']
+    #     print(f"Similarity distance from closest match: {distance:.4f}")
+
+    #     # Step 3: Compare and act
+    #     if distance < threshold:
+    #         print(f"Distance below threshold ({threshold}) → Not similar.")
+    #         os.makedirs(temp_folder, exist_ok=True)
+    #         target_path = os.path.join(temp_folder, image_name)
+    #         shutil.move(image_path, target_path)
+    #         print(f"Image moved to TEMP folder: {temp_folder}")
+    #         return False
+    #     else:
+    #         print(f"Distance meets threshold ({threshold}) → Image is similar. No move needed.")
+    #         return True
+
+
+    # def get_similar_images_curator(self, image_path: str, threshold: float = 0.4):
+    #     """
+    #     Main function to check image similarity and move image based on threshold.
+    #     If similarity is below threshold, moves it to 'temp' folder.
+    #     """
+    #     import os, shutil
+    #     temp_folder = "/media/shubham/ssd_hub1/neha_work/visual_env/env/DeepImageSearch/temp"
+
+    #     # Step 1: Extract the vector
+    #     query_vector = self._get_query_vector(image_path)
+
+    #     # Step 2: Check similarity using passed threshold
+    #     is_similar = self._search_by_vector_curator(query_vector, threshold=threshold)
+
+    #     # Step 3: Move if not similar
+    #     if not is_similar:
+    #         os.makedirs(temp_folder, exist_ok=True)
+    #         image_name = os.path.basename(image_path)
+    #         target_path = os.path.join(temp_folder, image_name)
+    #         shutil.move(image_path, target_path)
+    #         print(f"Image moved to {temp_folder} due to low similarity.")
+    #         return False
+    #     else:
+    #         print("Image similarity passed. No action taken.")
+    #         return True
+        
     def get_image_metadata_file(self):
         """
         Returns the metadata file containing information about the indexed images.
