@@ -1,5 +1,6 @@
 ### Sample Dataset Link:
 ### https://www.kaggle.com/datasets/iamsouravbanerjee/animal-image-dataset-90-different-animals
+
 import sys
 sys.path.append('/media/shubham/ssd_hub1/neha_work_deepsearch/DeepImageSearch2/DeepImageSearch')
 from DeepImageSearch import Load_Data, Search_Setup
