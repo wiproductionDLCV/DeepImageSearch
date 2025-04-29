@@ -279,7 +279,7 @@ class Search_Setup:
 
         D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
 
-        print(f"Total images to classify: {len(D[0])}")  # Log the number of images
+        print(f"Total images to classify: {len(D[0])}") # Log the number of images
         print(f"Distances for all images in the index:")
 
         similar_images = []
