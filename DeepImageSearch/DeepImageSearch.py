@@ -221,72 +221,7 @@ class Search_Setup:
         index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
         D, I = index.search(np.array([self.v], dtype=np.float32), self.n)
         return dict(zip(I[0], self.image_data.iloc[I[0]]['images_paths'].to_list()))
-
-    # def get_similar_images_similarity(self, image_path: str, reference_image_path: str, threshold: float):    #orinal code
-    #     """
-    #     This function will find the most similar image to the reference image from the FAISS index
-    #     and compare it to a given threshold.
-    #     """
-    #     image_name = os.path.basename(image_path)
-    #     print(f"\nChecking image: {image_name}")
-
-    #     # Step 1: Extract the feature vector for the query image
-    #     print("Extracting feature vector...")
-    #     query_vector = self._get_query_vector(image_path)
-
-    #     # Step 2: Search for the closest match in FAISS index
-    #     print(f"Searching in FAISS index with threshold {threshold}...")
-    #     result = self._search_by_vector_transfer_image(query_vector, threshold)
-
-    #     if result is None:
-    #         print("No match found in FAISS index. Skipping similarity check.")
-    #         return False
-
-    #     similar_images = result.get('similar_images', [])
-    #     if not similar_images:
-    #         print("No images found below the threshold.")
-    #         return False
-
-    #     print(f"Found {len(similar_images)} similar images below the threshold.")
-
-    #     return {
-    #         "Result": similar_images
-    #     }
-
-    # def _search_by_vector_transfer_image(self, v, threshold: float):
-    #     """
-    #     Search and log distances for images using the given threshold.
-    #     """
-    #     index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
-
-    #     total_vectors = index.ntotal
-    #     if total_vectors == 0:
-    #         print("[WARNING] FAISS index is empty.")
-    #         return None
-
-    #     D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
-
-    #     print(f"Total images to classify: {len(D[0])}")  # Log the number of images
-    #     print(f"Distances for all images in the index:")
-
-    #     similar_images = []
-
-    #     for idx, dist in enumerate(D[0]):
-    #         if dist <= threshold:  # Corrected to show images that are similar
-    #             print(f"Image {I[0][idx]} is similar with distance {dist:.4f}")  # Indicate similar
-    #             similar_images.append({
-    #                 "index": I[0][idx],
-    #                 "distance": dist
-    #             })
-    #         else:
-    #             print(f"Image {I[0][idx]} with distance {dist:.4f} → Not similar")
-
-    #     if similar_images:
-    #         return {
-    #             "similar_images": similar_images
-    #         }
-    #     else:
-    #         return None  # No similar images found    
+ 
     def get_similar_images_similarity(self, image_path: str, reference_image_path: str, threshold: float):
         """
         This function will find the most similar image to the reference image from the FAISS index
@@ -366,74 +301,7 @@ class Search_Setup:
         else:
             return None  # No similar images found
 
-    # def get_similar_images_similarity(self, image_path: str, reference_image_path: str, threshold: float):
-    #     """  orinla code
-    #     Compare the similarity between the given image and a reference image using FAISS index.
-
-    #     :param image_path: Path to the image to compare.
-    #     :param reference_image_path: Path to the reference image for comparison.
-    #     :param threshold: Threshold value to determine if images are similar (0.0 to 1.0).
-    #     :return: A dictionary with similarity score and boolean indicating similarity.
-    #     """
-
-    #     print(f"\nComparing images using FAISS:")
-    #     print(f" - Query Image: {os.path.basename(image_path)}")
-    #     print(f" - Reference Image: {os.path.basename(reference_image_path)}")
-
-    #     # Step 1: Extract feature vector of the query image
-    #     print("Extracting feature vector for query image...")
-    #     query_vector = self._get_query_vector(image_path)
-
-    #     # Step 2: Extract feature vector for the reference image
-    #     print("Extracting feature vector for reference image...")
-    #     reference_vector = self._get_query_vector(reference_image_path)
-
-    #     # Step 3: Search FAISS index for the reference image vector
-    #     print("Searching reference image vector in FAISS index...")
-    #     reference_search_result = self._search_by_vector_transfer_image(reference_vector, threshold)
-
-    #     if reference_search_result is None:
-    #         print("[ERROR] Reference image not found in FAISS index.")
-    #         return None
-
-    #     reference_index = reference_search_result['index']
-    #     print(f"Reference image found at FAISS index: {reference_index}")
-
-    #     # Step 4: Search FAISS index for the query image vector
-    #     print("Searching query image vector in FAISS index...")
-    #     query_search_result = self._search_by_vector_transfer_image(query_vector, threshold)
-
-    #     if query_search_result is None:
-    #         print("[ERROR] Query image not found in FAISS index.")
-    #         return None
-
-    #     query_index = query_search_result['index']
-    #     print(f"Query image found at FAISS index: {query_index}")
-
-    #     # Step 5: Calculate similarity score
-    #     similarity_score = self._calculate_similarity_score(query_vector, reference_vector)
-    #     print(f"Similarity Score: {similarity_score:.4f}")
-
-    #     # Step 6: Return similarity score and threshold result
-    #     return {
-    #         "similarity_score": similarity_score,
-    #         "is_similar": similarity_score >= threshold
-    #     }
-
-    # def _calculate_similarity_score(self, query_vector, reference_vector):
-    #     """
-    #     Calculate the similarity score between the query and reference vectors.
-
-    #     :param query_vector: Feature vector of the query image.
-    #     :param reference_vector: Feature vector of the reference image.
-    #     :return: A similarity score (0.0 to 1.0).
-    #     """
-    #     from sklearn.metrics.pairwise import cosine_similarity
-
-    #     score = cosine_similarity([query_vector], [reference_vector])
-    #     return score[0][0]
-        
-           
+   
     def get_similar_images_curator(self, image_path: str, threshold: float = 0.7):
         """
         Consistent threshold across the functions.
@@ -504,52 +372,14 @@ class Search_Setup:
         print(f"[INFO] Top FAISS distance: {top_distance}")
         print(f"[INFO] Top FAISS index: {top_index}")
 
-        if top_distance < threshold:  # Consistent threshold logic
+        if top_distance < threshold: 
             return {
                 "index": top_index,
                 "distance": top_distance
             }
         else:
-            return None  # Not similar enough
+            return None  
         
-    # def _search_by_vector_transfer_image(self, v, threshold: float = 0.7):
-    #         """
-    #         Search and log distances for images using the given threshold.
-    #         """
-    #         index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
-    #         # index = config.image_features_vectors_idx(self.model_name)
-    #         # if not os.path.exists(index):
-    #         #     print(f"Error: Index file {index} does not exist.")
-    #         #     return None
-
-    #         total_vectors = index.ntotal
-    #         if total_vectors == 0:
-    #             print("[WARNING] FAISS index is empty.")
-    #             return None
-
-    #         D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
-
-    #         print(f"Total images to classify: {len(D[0])}")  # Log the number of images
-    #         print(f"Distances for all images in the index:")
-
-    #         for idx, dist in enumerate(D[0]):
-    #             if dist >= threshold:
-    #                 print(f"Distance for image {I[0][idx]}: {dist:.4f} → Not similar")  # Indicate not similar
-
-    #         top_distance = D[0][0]
-    #         top_index = I[0][0]
-
-    #         print(f"[INFO] Top FAISS distance: {top_distance}")
-    #         print(f"[INFO] Top FAISS index: {top_index}")
-
-    #         if top_distance < threshold:  # Consistent threshold logic
-    #             return {
-    #                 "index": top_index,
-    #                 "distance": top_distance
-    #             }
-    #         else:
-    #             return None  # Not similar enough
-            
     def _get_query_vector(self, image_path: str):
         self.image_path = image_path
         img = Image.open(self.image_path)
