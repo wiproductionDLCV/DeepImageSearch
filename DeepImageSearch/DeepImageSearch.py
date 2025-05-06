@@ -15,6 +15,8 @@ import math
 import faiss
 import gc
 import time
+import csv
+import matplotlib.pyplot as plt
 
 class Load_Data:
     """A class for loading data from single/multiple folders or a CSV file"""
@@ -142,7 +144,9 @@ class Search_Setup:
             feature = self.model(x)  # [1, F]
 
         feature = feature.detach().cpu().numpy().flatten()     # [F]  #  Feature matrix shape: (1000, 4096)
+        
         return feature / np.linalg.norm(feature)
+    
     
 
     def _extract_batch(self, img_list, batch_size=32):
@@ -288,10 +292,12 @@ class Search_Setup:
                 print("\033[92m Using GPU for FAISS indexing...")
                 res = faiss.StandardGpuResources()
                 index_cpu = faiss.IndexFlatL2(d)
+                # index_cpu = faiss.IndexFlatIP(d)
                 index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
             else:
                 print("\033[93m Using CPU for FAISS indexing...")
                 index = faiss.IndexFlatL2(d)
+                # index = faiss.IndexFlatIP(d)
             
             
             num_vectors = features_matrix.shape[0]
@@ -326,6 +332,8 @@ class Search_Setup:
             else:
                 faiss.write_index(index, index_path)
 
+            # Assign the index to the class variable for later use
+            self.index = index
             print(f"\033[94m FAISS index saved to: {index_path}")
 
         except Exception as e:
@@ -427,93 +435,6 @@ class Search_Setup:
  
 ######################### Custom functions ########################################################
 
-
-    def get_similar_images_similarity(self, image_path: str, reference_image_path: str, threshold: float):
-        """
-        This function will find the most similar image to the reference image from the FAISS index
-        and compare it to a given threshold. Avoids multiple checks of the same image.
-        """
-        image_name = os.path.basename(image_path)
-        print(f"\nChecking image: {image_name}")
-
-        # Step 1: Extract the feature vector for the query image
-        print("Extracting feature vector...")
-        query_vector = self._get_query_vector(image_path)
-
-        # Track processed images to avoid repeated processing
-        if hasattr(self, 'processed_images'):
-            if image_path in self.processed_images:
-                print(f"Skipping already processed image: {image_name}")
-                return False
-        else:
-            self.processed_images = set()  # Initialize the set of processed images if not already present
-
-        # Step 2: Search for the closest match in FAISS index
-        print(f"Searching in FAISS index with threshold {threshold}...")
-        result = self._search_by_vector_transfer_image(query_vector, threshold)
-
-        if result is None:
-            print("No match found in FAISS index. Skipping similarity check.")
-            self.processed_images.add(image_path)  # Mark the image as processed
-            return False
-
-        similar_images = result.get('similar_images', [])
-        if not similar_images:
-            print("No images found below the threshold.")
-            self.processed_images.add(image_path)  # Mark the image as processed
-            return False
-
-        print(f"Found {len(similar_images)} similar images below the threshold.")
-
-        # Add the current image to the set of processed images
-        self.processed_images.add(image_path)
-
-        return {
-            "Result": similar_images
-        }
-
-    def _search_by_vector_transfer_image(self, v, threshold: float):
-        """
-        Search and log distances for images using the given threshold.
-        """
-        index_cpu = faiss.read_index(config.image_features_vectors_idx(self.model_name))
-        if faiss.get_num_gpus() and self.use_gpu > 0:
-            print("\033[92m Using GPU for FAISS search")
-            res = faiss.StandardGpuResources()
-            index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
-        else:
-            print("\033[93m Using CPU for FAISS search")
-            index = index_cpu
-
-        total_vectors = index.ntotal
-        if total_vectors == 0:
-            print("[WARNING] FAISS index is empty.")
-            return None
-        
-
-        D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
-
-        print(f"Total images to classify: {len(D[0])}") # Log the number of images
-        print(f"Distances for all images in the index:")
-
-        similar_images = []
-
-        for idx, dist in enumerate(D[0]):
-            if dist <= threshold:  # Corrected to show images that are similar
-                print(f"Image {I[0][idx]} is similar with distance {dist:.4f}")  # Indicate similar
-                similar_images.append({
-                    "index": I[0][idx],
-                    "distance": dist
-                })
-            else:
-                print(f"Image {I[0][idx]} with distance {dist:.4f} → Not similar")
-
-        if similar_images:
-            return {
-                "similar_images": similar_images
-            }
-        else:
-            return None  # No similar images found
         
     def _search_by_vector_curator(self, v, threshold: float = 0.7):
         """
@@ -605,33 +526,163 @@ class Search_Setup:
     # def find_similarity_images(self, unannotated_image_folder,threshold):
 
 
-    def annotate_folder(self, unannotated_image_folder, output_csv, threshold):
+    def annotate_folder_parallel(self, unannotated_image_folder, output_csv, threshold):
         unannotated_image_list = sorted([
             os.path.join(unannotated_image_folder, f)
             for f in os.listdir(unannotated_image_folder)
             if f.lower().endswith(('.png', '.jpg', '.jpeg'))
         ])
-        image_data = pd.DataFrame()
-        image_data['images_paths'] = unannotated_image_list
+        if not unannotated_image_list:
+            raise ValueError("No valid images found in the specified folder.")
         
         # Extract features of all images in unannotated folder 
+        print(f"Extracting features from {len(unannotated_image_list)} unannotated images...")
+        
         unannotated_dataset_features = self._get_feature_batch(unannotated_image_list,1000,32)
-        image_data['features'] = unannotated_dataset_features
-        image_data = image_data.dropna().reset_index(drop=True)
-        self.f = len(image_data['features'][0])
-        print(self.f)
-        print("Unannotated images features extracted successfully ")
+        unannotated_features = np.vstack(unannotated_dataset_features).astype('float32')  # (N, D)
+        # Confirm normalization of unannotated features
+        norms = np.linalg.norm(unannotated_features, axis=1)
+        print(f"Unannotated Feature norms ( Should be close to 1.0): min = {norms.min():.4f}, max = {norms.max():.4f}")
+        
         self._clear_gpu_cache()
+        
+        # Step 3: Ensure GPU index is loaded
+        if not hasattr(self, 'index') or self.index is None:
+            print("Loading FAISS index...")
+            index_path = config.image_features_vectors_idx(self.model_name)
+            index_cpu = faiss.read_index(index_path)
+
+            if faiss.get_num_gpus() > 0 and self.use_gpu:
+                print("\033[92m Using GPU for FAISS search")
+                res = faiss.StandardGpuResources()
+                self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+            else:
+                print("\033[93m Using CPU for FAISS search")
+                self.index = index_cpu
+            #self.index = index_cpu
+        # print("Index dimension:", self.index.d)  # From FAISS index
+        # print("Unannotated feature dimension:", unannotated_features.shape[1])
+
+        # Step 4: Perform batch FAISS search
+        top_k = self.index.ntotal
+        D, I = self.index.search(unannotated_features, top_k)
+        self.plot_distance_distribution(D,"unnanotated")
+        
+        print("\033[92m FAISS search completed.")
+        print("Min Distance:", D.min(), "Max Distance:", D.max())
+        # Print shape and sample values
+        print("Shape of D (Distances):", D.shape)
+        print("Shape of I (Indices):", I.shape)
+        
+        print("\nSample matches (below threshold):")
+        sample_count = 0
+        max_samples_to_print = 10  # Limit the number of prints
+        # Step 5: Load image paths for indexed (reference) images
+        if not hasattr(self, 'image_list'):
+            raise RuntimeError("Missing 'image_list' list for indexed dataset.")
+
+        # # Step 6: Collect threshold-based matches
+        results = []
+        for i, distances in enumerate(D):
+            query_path = unannotated_image_list[i]
+            for j, dist in enumerate(distances):
+                if dist <= threshold:
+                    reference_path = self.image_list[I[i][j]]
+                    results.append([
+                        os.path.basename(query_path),
+                        os.path.basename(reference_path),
+                        float(dist)
+                    ])
+                    if sample_count < max_samples_to_print:
+                        print(f"Query: {os.path.basename(query_path)} ↔ Reference: {os.path.basename(reference_path)} | Distance: {dist:.4f}")
+                        sample_count += 1
+
+        # Step 7: Save results to CSV
+        file_exists = os.path.isfile(output_csv)
+        with open(output_csv, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Query_Image", "Reference_Image", "Distance"])
+            writer.writerows(results)
+
+        print(f"\033[92m Matching complete. {len(results)} pairs saved to {output_csv}")
 
 
+    def annotate_folder_sequential(self, unannotated_image_folder, output_csv, threshold):
+        unannotated_image_list = sorted([
+            os.path.join(unannotated_image_folder, f)
+            for f in os.listdir(unannotated_image_folder)
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ])
+        if not unannotated_image_list:
+            raise ValueError("No valid images found in the specified folder.")
+        
+        # Extract features of all images in unannotated folder 
+        print(f"Extracting features from {len(unannotated_image_list)} unannotated images...")
+        
+        unannotated_dataset_features = self._get_feature_batch(unannotated_image_list,1000,32)
+        unannotated_features = np.vstack(unannotated_dataset_features).astype('float32')  # (N, D)
+        # Confirm normalization of unannotated features
+        norms = np.linalg.norm(unannotated_features, axis=1)
+        print(f"Unannotated Feature norms ( Should be close to 1.0): min = {norms.min():.4f}, max = {norms.max():.4f}")
+        
+        self._clear_gpu_cache()
+        
+        # Step 3: Ensure GPU index is loaded
+        if not hasattr(self, 'index') or self.index is None:
+            print("Loading FAISS index...")
+            index_path = config.image_features_vectors_idx(self.model_name)
+            index_cpu = faiss.read_index(index_path)
 
-        # logging.info(f"Total unannotated images: {len(all_images)}")
-        # for i in range(0, len(all_images), batch_size):
-        #     batch_paths = all_images[i:i+batch_size]
-        #     matched = self.process_batch(batch_paths, output_csv)
-        #     logging.info(f"Processed batch {i//batch_size+1}: {matched} matches found")
+            if faiss.get_num_gpus() > 0 and self.use_gpu:
+                print("\033[92m Using GPU for FAISS search")
+                res = faiss.StandardGpuResources()
+                self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+            else:
+                print("\033[93m Using CPU for FAISS search")
+                self.index = index_cpu
 
+        results = []
+        max_samples_to_print = 10
+        sample_count = 0
+        
+        
+        print("\033[96m[INFO] Starting per-image FAISS search...")
+        
+        for idx in tqdm(range(len(unannotated_features)), desc="FAISS Search", unit="img"):
+            query_feat = unannotated_features[idx]
+            query_path = unannotated_image_list[idx]
 
+            # Normalize (if needed)
+            # query_feat = query_feat / np.linalg.norm(query_feat)
+            query_feat = query_feat.astype('float32').reshape(1, -1)
+
+            # Search FAISS index
+            D, I = self.index.search(query_feat, self.index.ntotal)
+
+            for j, dist in enumerate(D[0]):
+                if dist <= threshold:
+                    reference_path = self.image_list[I[0][j]]
+                    results.append([
+                        os.path.basename(query_path),
+                        os.path.basename(reference_path),
+                        float(dist)
+                    ])
+                    if sample_count < max_samples_to_print:
+                        print(f"Query: {os.path.basename(query_path)} ↔ Reference: {os.path.basename(reference_path)} | Distance: {dist:.4f}")
+                        sample_count += 1
+
+        print(f"\033[92m Matching complete. {len(results)} pairs saved to {output_csv}")
+
+        # Save results to CSV
+        file_exists = os.path.isfile(output_csv)
+        with open(output_csv, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Query_Image", "Reference_Image", "Distance"])
+            writer.writerows(results)
+
+    
 ########################################################################
 
     def _get_query_vector(self, image_path: str):
@@ -708,3 +759,18 @@ class Search_Setup:
         """
         self.image_data = pd.read_pickle(config.image_data_with_features_pkl(self.model_name))
         return self.image_data
+
+
+    def plot_distance_distribution(self,D,image_name):
+        # Flatten all distances into one array
+        all_distances = D.flatten()
+
+        # Plot histogram
+        plt.figure(figsize=(10, 5))
+        plt.hist(all_distances, bins=100, color='skyblue', edgecolor='black')
+        plt.title("Histogram of FAISS L2 Distances")
+        plt.xlabel("L2 Distance")
+        plt.ylabel("Frequency")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig('/home/wi/work/annotation_transfer_tool_gpu/'+image_name+'_distance_distribution.png')
