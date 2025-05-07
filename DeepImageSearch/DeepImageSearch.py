@@ -13,6 +13,10 @@ import timm
 from PIL import ImageOps
 import math
 import faiss
+import gc
+import time
+import csv
+import matplotlib.pyplot as plt
 
 class Load_Data:
     """A class for loading data from single/multiple folders or a CSV file"""
@@ -58,7 +62,7 @@ class Load_Data:
 
 class Search_Setup:
     """ A class for setting up and running image similarity search."""
-    def __init__(self, image_list: list, model_name='vgg19', pretrained=True, image_count: int = None):
+    def __init__(self, image_list: list, model_name='vgg19', pretrained=True, image_count: int = None,use_gpu=False,use_batch_processing=False):
         """
         Parameters:
         -----------
@@ -71,6 +75,23 @@ class Search_Setup:
         image_count : int, optional (default=None)
         The number of images to be indexed and searched. If None, all images in the image_list will be used.
         """
+
+        # Set device: GPU if available, else CPU
+        self.use_gpu = use_gpu
+        self.image_batch_size = 1000
+        self.batch_size = 32
+
+        if self.use_gpu : 
+            self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            
+            faiss_num_gpu = faiss.get_num_gpus() 
+            print(f"\033[92m Number of GPUs available for FAISS: {faiss_num_gpu}")
+
+        else: 
+            self.device = 'cpu'
+        print(f"\033[92m Using device: {self.device}")
+
+
         self.model_name = model_name
         self.pretrained = pretrained
         self.image_data = pd.DataFrame()
@@ -79,6 +100,11 @@ class Search_Setup:
             self.image_list = image_list
         else:
             self.image_list = image_list[:image_count]
+
+        self.use_batch_processing = use_batch_processing
+
+        if self.use_batch_processing:
+            print(f"\033[92m Using Batch processing to extract features from images")
 
         if f'metadata-files/{self.model_name}' not in os.listdir():
             try:
@@ -91,9 +117,15 @@ class Search_Setup:
         print("\033[91m Please Wait Model Is Loading or Downloading From Server!")
         base_model = timm.create_model(self.model_name, pretrained=self.pretrained)
         self.model = torch.nn.Sequential(*list(base_model.children())[:-1])
-        self.model.eval()
+        self.model.eval().to(self.device)  # Move model to GPU if available
         print(f"\033[92m Model Loaded Successfully: {model_name}")
 
+    def _clear_gpu_cache(self):
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            gc.collect()
+            print("\033[94m Cleared GPU memory cache")
+            
     def _extract(self, img):
         # Resize and convert the image
         img = img.resize((224, 224))
@@ -105,12 +137,55 @@ class Search_Setup:
             transforms.Normalize(mean=[0.485, 0.456, 0.406],std=[0.229,0.224, 0.225]),
         ])
         x = preprocess(img)
-        x = Variable(torch.unsqueeze(x, dim=0).float(), requires_grad=False)
+        x = Variable(torch.unsqueeze(x, dim=0).float(), requires_grad=False).to(self.device) # [1, 3, 224, 224]
 
         # Extract features
-        feature = self.model(x)
-        feature = feature.data.numpy().flatten()
+        with torch.no_grad():
+            feature = self.model(x)  # [1, F]
+
+        feature = feature.detach().cpu().numpy().flatten()     # [F]  #  Feature matrix shape: (1000, 4096)
+        
         return feature / np.linalg.norm(feature)
+    
+    
+
+    def _extract_batch(self, img_list, batch_size=32):
+        """
+        Extracts normalized features from a list of PIL images in batches using GPU.
+        Returns a list of 1D NumPy arrays (shape: [4096,]), like _extract.
+        """
+        preprocess = transforms.Compose([
+            transforms.Resize((224, 224)),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                std=[0.229, 0.224, 0.225])
+        ])
+
+        all_features = []
+        all_tensors = [preprocess(img.convert("RGB")) for img in img_list]
+        dataset = torch.stack(all_tensors)  # (N, 3, 224, 224)
+
+        self.model.eval()
+
+        with torch.no_grad():
+            for i in range(0, len(dataset), batch_size):
+                batch = dataset[i:i + batch_size].to(self.device)
+                outputs = self.model(batch)  # Shape: (B, F) or (B, F, 1, 1)
+
+                # Flatten per-feature if needed
+                if len(outputs.shape) > 2:
+                    outputs = outputs.view(outputs.size(0), -1)  # (B, F)
+
+                outputs = outputs.detach().cpu().numpy()
+
+                # Normalize each vector and flatten to 1D
+                normed_features = outputs / np.linalg.norm(outputs, axis=1, keepdims=True)
+                flattened = [feat.flatten() for feat in normed_features]
+
+                all_features.extend(flattened)
+
+        return all_features  # List of arrays, each of shape (4096,)
+
 
     def _get_feature(self, image_data: list):
         self.image_data = image_data
@@ -122,29 +197,149 @@ class Search_Setup:
                 features.append(feature)
             except:
                # If there is an error, append None to the feature list
+               print("\033[91m Failed to extract Feature from image")
                features.append(None)
-               continue
+               continue        
+
         return features
+    
+    def _get_feature_batch(self, image_data: list, image_batch_size=1000, feature_extraction_batch_size=32):
+        """
+        Efficient and scalable feature extraction:
+        - Loads images in `image_batch_size` to avoid memory/file limits
+        - Uses `feature_extraction_batch_size` for GPU batch inference
+        """
+        self.image_data = image_data
+        total_images = len(image_data)
+        full_features = []
+
+        for i in tqdm(range(0, total_images, image_batch_size), desc="Extracting features for image batch "):
+            batch_paths = image_data[i:i + image_batch_size]
+
+            images = []
+            valid_paths = []
+            failed_paths = []
+
+            for path in batch_paths:
+                try:
+                    img = Image.open(path)
+                    img.load()
+                    images.append(img.copy())
+                    img.close()
+                    valid_paths.append(path)
+                except Exception as e:
+                    print(f"\033[91m Failed to open image: {path} | Error: {e}")
+                    failed_paths.append(path)
+
+            # Extract features for the current image batch
+            batch_features = self._extract_batch(images, batch_size=feature_extraction_batch_size)
+
+            # Reconstruct full feature list
+            valid_idx = 0
+            for path in batch_paths:
+                if path in valid_paths:
+                    full_features.append(batch_features[valid_idx])
+                    valid_idx += 1
+                else:
+                    full_features.append(None)
+
+        return full_features
 
     def _start_feature_extraction(self):
+        print("\033[94m Starting feature extraction...")
         image_data = pd.DataFrame()
         image_data['images_paths'] = self.image_list
-        f_data = self._get_feature(self.image_list)
+
+        if self.use_batch_processing : 
+            if self.use_gpu:
+                f_data = self._get_feature_batch(self.image_list,self.image_batch_size,self.batch_size)
+            else :
+                f_data = self._get_feature_batch(self.image_list,self.image_batch_size,1)   # Process single image when using CPU
+
+        else:
+            f_data = self._get_feature(self.image_list)
+
         image_data['features'] = f_data
         image_data = image_data.dropna().reset_index(drop=True)
         image_data.to_pickle(config.image_data_with_features_pkl(self.model_name))
         print(f"\033[94m Image Meta Information Saved: [metadata-files/{self.model_name}/image_data_features.pkl]")
         return image_data
 
-    def _start_indexing(self, image_data):
+    def _start_indexing(self, image_data,batch_size=256):
+        print("\033[94m Starting FAISS indexing...")
         self.image_data = image_data
-        d = len(image_data['features'][0])  # Length of item vector that will be indexed
-        self.d = d
-        index = faiss.IndexFlatL2(d)
-        features_matrix = np.vstack(image_data['features'].values).astype(np.float32)
-        index.add(features_matrix)  # Add the features matrix to the index
-        faiss.write_index(index, config.image_features_vectors_idx(self.model_name))
-        print("\033[94m Saved The Indexed File:" + f"[metadata-files/{self.model_name}/image_features_vectors.idx]")
+
+        try:
+            first_vector = image_data['features'][0]
+            d = len(first_vector)
+            self.d = d
+            print(f"\033[96m Vector dimension (d): {d}")
+        except Exception as e:
+            print(f"\033[91m Error determining vector dimension: {e}")
+            return
+
+        try:
+            features_matrix = np.vstack(image_data['features'].values).astype(np.float32)
+            print(f"\033[96m Feature matrix shape: {features_matrix.shape}")
+            if self.use_gpu :
+                self._clear_gpu_cache()
+        except Exception as e:
+            print(f"\033[91m Error stacking features: {e}")
+            return
+        
+        try:
+            if faiss.get_num_gpus() > 0 and self.use_gpu:
+                print("\033[92m Using GPU for FAISS indexing...")
+                res = faiss.StandardGpuResources()
+                index_cpu = faiss.IndexFlatL2(d)
+                # index_cpu = faiss.IndexFlatIP(d)
+                index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+            else:
+                print("\033[93m Using CPU for FAISS indexing...")
+                index = faiss.IndexFlatL2(d)
+                # index = faiss.IndexFlatIP(d)
+            
+            
+            num_vectors = features_matrix.shape[0]
+            total_added = 0
+            print(f"\033[94m Number of feature vectors to Index: {num_vectors}")
+            start_time = time.time()
+            # Calculate total steps by ceil division
+            num_batches = (num_vectors + batch_size - 1) // batch_size
+            print(f"\033[96m Total batches to index: {num_batches}")
+
+            with tqdm(total=num_vectors, desc="Indexing features", ncols=100) as pbar:
+                for i in range(0, num_vectors, batch_size):
+                    batch = features_matrix[i:i + batch_size]
+                    batch_start = time.time()
+                    index.add(batch)
+                    batch_elapsed = time.time() - batch_start
+                    batch_speed = batch.shape[0] / batch_elapsed if batch_elapsed > 0 else float('inf')
+
+                    total_added += batch.shape[0]
+                    pbar.update(batch.shape[0])
+                    pbar.set_postfix(speed=f"{batch_speed:.2f} vec/s")
+
+            total_elapsed = time.time() - start_time
+            overall_speed = total_added / total_elapsed if total_elapsed > 0 else float('inf')
+
+            print(f"\033[92m Indexed {total_added} vectors in {total_elapsed:.2f}s "
+                f"({overall_speed:.2f} vectors/sec)")
+
+            index_path = config.image_features_vectors_idx(self.model_name)
+            if faiss.get_num_gpus() > 0:
+                faiss.write_index(faiss.index_gpu_to_cpu(index), index_path)
+            else:
+                faiss.write_index(index, index_path)
+
+            # Assign the index to the class variable for later use
+            self.index = index
+            print(f"\033[94m FAISS index saved to: {index_path}")
+
+        except Exception as e:
+            print(f"\033[91m Error during FAISS indexing: {e}")
+
+        # print(f"\033[94m Saved The Indexed File: [metadata-files/{self.model_name}/image_features_vectors.idx]")
 
     def run_index(self, force_reextract: str = None):
         """
@@ -161,6 +356,8 @@ class Search_Setup:
 
         if not os.path.exists(metadata_dir) or len(os.listdir(metadata_dir)) == 0:
             data = self._start_feature_extraction()
+            if self.use_gpu :
+                self._clear_gpu_cache()
             self._start_indexing(data)
         else:
             if force_reextract is None:
@@ -171,6 +368,8 @@ class Search_Setup:
 
             if flag == 'yes':
                 data = self._start_feature_extraction()
+                if self.use_gpu :
+                    self._clear_gpu_cache()
                 self._start_indexing(data)
             else:
                 print("\033[93m Meta data already Present, Please Apply Search!")
@@ -212,66 +411,44 @@ class Search_Setup:
         # Save the updated metadata and index
         self.image_data.to_pickle(config.image_data_with_features_pkl(self.model_name))
         faiss.write_index(index, config.image_features_vectors_idx(self.model_name))
-
+        if self.use_gpu :
+            self._clear_gpu_cache()
         print(f"\033[92m New images added to the index: {len(new_image_paths)}")
 
     def _search_by_vector(self, v, n: int):
         self.v = v
         self.n = n
-        index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
+
+        index_cpu = faiss.read_index(config.image_features_vectors_idx(self.model_name))
+
+        if faiss.get_num_gpus() and self.use_gpu > 0:
+            print("\033[92m Using GPU for FAISS search")
+            res = faiss.StandardGpuResources()
+            index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+        else:
+            print("\033[93m Using CPU for FAISS search")
+            index = index_cpu
+
         D, I = index.search(np.array([self.v], dtype=np.float32), self.n)
         return dict(zip(I[0], self.image_data.iloc[I[0]]['images_paths'].to_list()))
+
  
-    def get_similar_images_similarity(self, image_path: str, reference_image_path: str, threshold: float):
-        """
-        This function will find the most similar image to the reference image from the FAISS index
-        and compare it to a given threshold. Avoids multiple checks of the same image.
-        """
-        image_name = os.path.basename(image_path)
-        print(f"\nChecking image: {image_name}")
+######################### Custom functions ########################################################
 
-        # Step 1: Extract the feature vector for the query image
-        print("Extracting feature vector...")
-        query_vector = self._get_query_vector(image_path)
-
-        # Track processed images to avoid repeated processing
-        if hasattr(self, 'processed_images'):
-            if image_path in self.processed_images:
-                print(f"Skipping already processed image: {image_name}")
-                return False
-        else:
-            self.processed_images = set()  # Initialize the set of processed images if not already present
-
-        # Step 2: Search for the closest match in FAISS index
-        print(f"Searching in FAISS index with threshold {threshold}...")
-        result = self._search_by_vector_transfer_image(query_vector, threshold)
-
-        if result is None:
-            print("No match found in FAISS index. Skipping similarity check.")
-            self.processed_images.add(image_path)  # Mark the image as processed
-            return False
-
-        similar_images = result.get('similar_images', [])
-        if not similar_images:
-            print("No images found below the threshold.")
-            self.processed_images.add(image_path)  # Mark the image as processed
-            return False
-
-        print(f"Found {len(similar_images)} similar images below the threshold.")
-
-        # Add the current image to the set of processed images
-        self.processed_images.add(image_path)
-
-        return {
-            "Result": similar_images
-        }
-
-    def _search_by_vector_transfer_image(self, v, threshold: float):
+        
+    def _search_by_vector_curator(self, v, threshold: float = 0.7):
         """
         Search and log distances for images using the given threshold.
         """
-        index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
-
+        index_cpu = faiss.read_index(config.image_features_vectors_idx(self.model_name))
+        if faiss.get_num_gpus() and self.use_gpu > 0:
+            print("\033[92m Using GPU for FAISS search")
+            res = faiss.StandardGpuResources()
+            index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+        else:
+            print("\033[93m Using CPU for FAISS search")
+            index = index_cpu
+            
         total_vectors = index.ntotal
         if total_vectors == 0:
             print("[WARNING] FAISS index is empty.")
@@ -279,28 +456,26 @@ class Search_Setup:
 
         D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
 
-        print(f"Total images to classify: {len(D[0])}") # Log the number of images
+        print(f"Total images to classify: {len(D[0])}")  # Log the number of images
         print(f"Distances for all images in the index:")
 
-        similar_images = []
-
         for idx, dist in enumerate(D[0]):
-            if dist <= threshold:  # Corrected to show images that are similar
-                print(f"Image {I[0][idx]} is similar with distance {dist:.4f}")  # Indicate similar
-                similar_images.append({
-                    "index": I[0][idx],
-                    "distance": dist
-                })
-            else:
-                print(f"Image {I[0][idx]} with distance {dist:.4f} → Not similar")
+            if dist >= threshold:
+                print(f"Distance for image {I[0][idx]}: {dist:.4f} → Not similar")  # Indicate not similar
 
-        if similar_images:
+        top_distance = D[0][0]
+        top_index = I[0][0]
+
+        print(f"[INFO] Top FAISS distance: {top_distance}")
+        print(f"[INFO] Top FAISS index: {top_index}")
+
+        if top_distance < threshold: 
             return {
-                "similar_images": similar_images
+                "index": top_index,
+                "distance": top_distance
             }
         else:
-            return None  # No similar images found
-
+            return None  
    
     def get_similar_images_curator(self, image_path: str, threshold: float = 0.7):
         """
@@ -347,39 +522,169 @@ class Search_Setup:
             print(f"Distance meets threshold ({threshold}) → Image is similar. No move needed.")
             return True
 
-    def _search_by_vector_curator(self, v, threshold: float = 0.7):
-        """
-        Search and log distances for images using the given threshold.
-        """
-        index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
-        total_vectors = index.ntotal
-        if total_vectors == 0:
-            print("[WARNING] FAISS index is empty.")
-            return None
 
-        D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
+    # def find_similarity_images(self, unannotated_image_folder,threshold):
 
-        print(f"Total images to classify: {len(D[0])}")  # Log the number of images
-        print(f"Distances for all images in the index:")
 
-        for idx, dist in enumerate(D[0]):
-            if dist >= threshold:
-                print(f"Distance for image {I[0][idx]}: {dist:.4f} → Not similar")  # Indicate not similar
-
-        top_distance = D[0][0]
-        top_index = I[0][0]
-
-        print(f"[INFO] Top FAISS distance: {top_distance}")
-        print(f"[INFO] Top FAISS index: {top_index}")
-
-        if top_distance < threshold: 
-            return {
-                "index": top_index,
-                "distance": top_distance
-            }
-        else:
-            return None  
+    def annotate_folder_parallel(self, unannotated_image_folder, output_csv, threshold):
+        unannotated_image_list = sorted([
+            os.path.join(unannotated_image_folder, f)
+            for f in os.listdir(unannotated_image_folder)
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ])
+        if not unannotated_image_list:
+            raise ValueError("No valid images found in the specified folder.")
         
+        # Extract features of all images in unannotated folder 
+        print(f"Extracting features from {len(unannotated_image_list)} unannotated images...")
+        
+        unannotated_dataset_features = self._get_feature_batch(unannotated_image_list,1000,32)
+        unannotated_features = np.vstack(unannotated_dataset_features).astype('float32')  # (N, D)
+        # Confirm normalization of unannotated features
+        norms = np.linalg.norm(unannotated_features, axis=1)
+        print(f"Unannotated Feature norms ( Should be close to 1.0): min = {norms.min():.4f}, max = {norms.max():.4f}")
+        
+        self._clear_gpu_cache()
+        
+        # Step 3: Ensure GPU index is loaded
+        if not hasattr(self, 'index') or self.index is None:
+            print("Loading FAISS index...")
+            index_path = config.image_features_vectors_idx(self.model_name)
+            index_cpu = faiss.read_index(index_path)
+
+            if faiss.get_num_gpus() > 0 and self.use_gpu:
+                print("\033[92m Using GPU for FAISS search")
+                res = faiss.StandardGpuResources()
+                self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+            else:
+                print("\033[93m Using CPU for FAISS search")
+                self.index = index_cpu
+            #self.index = index_cpu
+        # print("Index dimension:", self.index.d)  # From FAISS index
+        # print("Unannotated feature dimension:", unannotated_features.shape[1])
+
+        # Step 4: Perform batch FAISS search
+        top_k = self.index.ntotal
+        D, I = self.index.search(unannotated_features, top_k)
+        self.plot_distance_distribution(D,"unnanotated")
+        
+        print("\033[92m FAISS search completed.")
+        print("Min Distance:", D.min(), "Max Distance:", D.max())
+        # Print shape and sample values
+        print("Shape of D (Distances):", D.shape)
+        print("Shape of I (Indices):", I.shape)
+        
+        print("\nSample matches (below threshold):")
+        sample_count = 0
+        max_samples_to_print = 10  # Limit the number of prints
+        # Step 5: Load image paths for indexed (reference) images
+        if not hasattr(self, 'image_list'):
+            raise RuntimeError("Missing 'image_list' list for indexed dataset.")
+
+        # # Step 6: Collect threshold-based matches
+        results = []
+        for i, distances in enumerate(D):
+            query_path = unannotated_image_list[i]
+            for j, dist in enumerate(distances):
+                if dist <= threshold:
+                    reference_path = self.image_list[I[i][j]]
+                    results.append([
+                        os.path.basename(query_path),
+                        os.path.basename(reference_path),
+                        float(dist)
+                    ])
+                    if sample_count < max_samples_to_print:
+                        print(f"Query: {os.path.basename(query_path)} ↔ Reference: {os.path.basename(reference_path)} | Distance: {dist:.4f}")
+                        sample_count += 1
+
+        # Step 7: Save results to CSV
+        file_exists = os.path.isfile(output_csv)
+        with open(output_csv, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Query_Image", "Reference_Image", "Distance"])
+            writer.writerows(results)
+
+        print(f"\033[92m Matching complete. {len(results)} pairs saved to {output_csv}")
+
+
+    def annotate_folder_sequential(self, unannotated_image_folder, output_csv, threshold):
+        unannotated_image_list = sorted([
+            os.path.join(unannotated_image_folder, f)
+            for f in os.listdir(unannotated_image_folder)
+            if f.lower().endswith(('.png', '.jpg', '.jpeg'))
+        ])
+        if not unannotated_image_list:
+            raise ValueError("No valid images found in the specified folder.")
+        
+        # Extract features of all images in unannotated folder 
+        print(f"Extracting features from {len(unannotated_image_list)} unannotated images...")
+        
+        unannotated_dataset_features = self._get_feature_batch(unannotated_image_list,1000,32)
+        unannotated_features = np.vstack(unannotated_dataset_features).astype('float32')  # (N, D)
+        # Confirm normalization of unannotated features
+        norms = np.linalg.norm(unannotated_features, axis=1)
+        print(f"Unannotated Feature norms ( Should be close to 1.0): min = {norms.min():.4f}, max = {norms.max():.4f}")
+        
+        self._clear_gpu_cache()
+        
+        # Step 3: Ensure GPU index is loaded
+        if not hasattr(self, 'index') or self.index is None:
+            print("Loading FAISS index...")
+            index_path = config.image_features_vectors_idx(self.model_name)
+            index_cpu = faiss.read_index(index_path)
+
+            if faiss.get_num_gpus() > 0 and self.use_gpu:
+                print("\033[92m Using GPU for FAISS search")
+                res = faiss.StandardGpuResources()
+                self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+            else:
+                print("\033[93m Using CPU for FAISS search")
+                self.index = index_cpu
+
+        results = []
+        max_samples_to_print = 10
+        sample_count = 0
+        
+        
+        print("\033[96m[INFO] Starting per-image FAISS search...")
+        
+        for idx in tqdm(range(len(unannotated_features)), desc="FAISS Search", unit="img"):
+            query_feat = unannotated_features[idx]
+            query_path = unannotated_image_list[idx]
+
+            # Normalize (if needed)
+            # query_feat = query_feat / np.linalg.norm(query_feat)
+            query_feat = query_feat.astype('float32').reshape(1, -1)
+
+            # Search FAISS index
+            D, I = self.index.search(query_feat, self.index.ntotal)
+
+            for j, dist in enumerate(D[0]):
+                if dist <= threshold:
+                    reference_path = self.image_list[I[0][j]]
+                    results.append([
+                        os.path.basename(query_path),
+                        os.path.basename(reference_path),
+                        float(dist)
+                    ])
+                    if sample_count < max_samples_to_print:
+                        print(f"Query: {os.path.basename(query_path)} ↔ Reference: {os.path.basename(reference_path)} | Distance: {dist:.4f}")
+                        sample_count += 1
+
+        print(f"\033[92m Matching complete. {len(results)} pairs saved to {output_csv}")
+
+        # Save results to CSV
+        file_exists = os.path.isfile(output_csv)
+        with open(output_csv, 'a', newline='') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Query_Image", "Reference_Image", "Distance"])
+            writer.writerows(results)
+
+    
+########################################################################
+
     def _get_query_vector(self, image_path: str):
         self.image_path = image_path
         img = Image.open(self.image_path)
@@ -406,7 +711,9 @@ class Search_Setup:
         plt.show()
 
         query_vector = self._get_query_vector(image_path)
-        img_list = list(self._search_by_vector_curator(query_vector, number_of_images).values())
+        img_list = list(self._search_by_vector(query_vector, number_of_images).values())
+        if self.use_gpu :    
+            self._clear_gpu_cache()
 
         grid_size = math.ceil(math.sqrt(number_of_images))
         axes = []
@@ -437,6 +744,8 @@ class Search_Setup:
         self.number_of_images = number_of_images
         query_vector = self._get_query_vector(self.image_path)
         img_dict = self._search_by_vector(query_vector, self.number_of_images)
+        if self.use_gpu :    
+            self._clear_gpu_cache()
         return img_dict
     
     def get_image_metadata_file(self):
@@ -450,3 +759,18 @@ class Search_Setup:
         """
         self.image_data = pd.read_pickle(config.image_data_with_features_pkl(self.model_name))
         return self.image_data
+
+
+    def plot_distance_distribution(self,D,image_name):
+        # Flatten all distances into one array
+        all_distances = D.flatten()
+
+        # Plot histogram
+        plt.figure(figsize=(10, 5))
+        plt.hist(all_distances, bins=100, color='skyblue', edgecolor='black')
+        plt.title("Histogram of FAISS L2 Distances")
+        plt.xlabel("L2 Distance")
+        plt.ylabel("Frequency")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig('/home/wi/work/annotation_transfer_tool_gpu/'+image_name+'_distance_distribution.png')
