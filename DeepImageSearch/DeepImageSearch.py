@@ -435,95 +435,69 @@ class Search_Setup:
  
 ######################### Custom functions ########################################################
 
-        
-    def _search_by_vector_curator(self, v, threshold: float = 0.7):
-        """
-        Search and log distances for images using the given threshold.
-        """
-        index_cpu = faiss.read_index(config.image_features_vectors_idx(self.model_name))
-        if faiss.get_num_gpus() and self.use_gpu > 0:
-            print("\033[92m Using GPU for FAISS search")
-            res = faiss.StandardGpuResources()
-            index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
-        else:
-            print("\033[93m Using CPU for FAISS search")
-            index = index_cpu
-            
-        total_vectors = index.ntotal
-        if total_vectors == 0:
-            print("[WARNING] FAISS index is empty.")
-            return None
-
-        D, I = index.search(np.array([v], dtype=np.float32), total_vectors)
-
-        print(f"Total images to classify: {len(D[0])}")  # Log the number of images
-        print(f"Distances for all images in the index:")
-
-        for idx, dist in enumerate(D[0]):
-            if dist >= threshold:
-                print(f"Distance for image {I[0][idx]}: {dist:.4f} → Not similar")  # Indicate not similar
-
-        top_distance = D[0][0]
-        top_index = I[0][0]
-
-        print(f"[INFO] Top FAISS distance: {top_distance}")
-        print(f"[INFO] Top FAISS index: {top_index}")
-
-        if top_distance < threshold: 
-            return {
-                "index": top_index,
-                "distance": top_distance
-            }
-        else:
-            return None  
-   
-    def get_similar_images_curator(self, image_path: str, threshold: float = 0.7):
+    def get_similar_images_curator(self, image_path_list: list, threshold: float):
         """
         Consistent threshold across the functions.
         """
-        temp_folder = "/media/shubham/ssd_hub1/neha_work/visual_env/env/DeepImageSearch/temp"
-        image_name = os.path.basename(image_path)
-        print(f"\nChecking image: {image_name}")
+        if not image_path_list:
+            raise ValueError("No valid images found in the specified folder.")
 
-        # Step 1: Extract the vector
-        print("Extracting feature vector...")
-        query_vector = self._get_query_vector(image_path)
+        bulk_dataset_features = self._get_feature_batch(image_path_list,1000,32)
+        bulk_features = np.vstack(bulk_dataset_features).astype('float32')  # (N, D)
+        
+        # Confirm normalization of bulk features
+        norms = np.linalg.norm(bulk_features, axis=1)
+        print(f"Unannotated Feature norms ( Should be close to 1.0): min = {norms.min():.4f}, max = {norms.max():.4f}")
+        
+        self._clear_gpu_cache()
 
-        # Step 2: Search using FAISS
-        print("Searching in FAISS index...")
-        result = self._search_by_vector_curator(query_vector, threshold)  # Use the same threshold here
+        # Step 3: Load the FAISS index CPU / GPU 
+        if not hasattr(self, 'index') or self.index is None:
+            print("Loading FAISS index...")
+            index_path = config.image_features_vectors_idx(self.model_name)
+            index_cpu = faiss.read_index(index_path)
 
-        if result is None:
-            print("No match found in FAISS index. Skipping similarity check.")
-            return False
+            if faiss.get_num_gpus() > 0 and self.use_gpu:
+                print("\033[92m Using GPU for FAISS search")
+                res = faiss.StandardGpuResources()
+                self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+            else:
+                print("\033[93m Using CPU for FAISS search")
+                self.index = index_cpu
+        
+        
+        # Step 4: Perform batch FAISS search for each image in bulk_features
+        # to find if highest matching image is below threshold
+        indexed_threshold_result = []
+        
+        for idx in tqdm(range(len(bulk_features)), desc="FAISS Search in Bulk Images", unit="img"):
+            query_feat = bulk_features[idx]
 
-        distance = result['distance']
-        print(f"Similarity distance from closest match: {distance:.4f}")
+            query_feat = query_feat.astype('float32').reshape(1, -1)
+            
+            # Search FAISS index
+            D, I = self.index.search(query_feat, self.index.ntotal)
+            
+            print(f"Total images to classify: {len(D[0])}")  # Log the number of images
+            print(f"Distances for all images in the index:")
 
-        # Step 3: Compare and act
-        if distance > threshold:
-            print(f"Distance below threshold ({threshold}) → Not similar.")
-            os.makedirs(temp_folder, exist_ok=True)
-            target_path = os.path.join(temp_folder, image_name)
-            shutil.move(image_path, target_path)
+            for idx, dist in enumerate(D[0]):
+                if dist >= threshold:
+                    print(f"Distance for image {I[0][idx]}: {dist:.4f} → Not similar")  # Indicate not similar
 
-            # Print the image moved to the temp folder along with its distance
-            print(f"Image moved to TEMP folder: {target_path}")
-            print(f"Distance of the image: {distance:.4f}")
+            top_distance = D[0][0]
+            top_index = I[0][0]
 
-            try:
-                image = Image.open(target_path)
-                image.show(title=f"Moved Image: {image_name} | Distance: {distance:.4f}")
-            except Exception as e:
-                print(f"Could not open the image: {e}")
-
-            return False
-        else:
-            print(f"Distance meets threshold ({threshold}) → Image is similar. No move needed.")
-            return True
-
-
-    # def find_similarity_images(self, unannotated_image_folder,threshold):
+            print(f"[INFO] Top FAISS distance: {top_distance}")
+            print(f"[INFO] Top FAISS index: {top_index}")
+            if top_distance < threshold: 
+                indexed_threshold_result.append(True)
+            else:
+                indexed_threshold_result.append(False)
+        
+        print("FAISS Search completed")   
+        
+        return indexed_threshold_result
 
 
     def annotate_folder_parallel(self, unannotated_image_folder, output_csv, threshold):
