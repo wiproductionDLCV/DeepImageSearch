@@ -454,20 +454,19 @@ class Search_Setup:
         # Step 3: Load the FAISS index CPU / GPU 
         # Limit the number of images to search in the index for GPU to 2048 if higher use CPU
 
-        if not hasattr(self, 'index') or self.index is None:
-            print("Loading FAISS index...")
-            index_path = config.image_features_vectors_idx(self.model_name)
-            index_cpu = faiss.read_index(index_path)
-            print(f"Total vectors in index: {index_cpu.ntotal}")
+        print("Loading FAISS index...")
+        index_path = config.image_features_vectors_idx(self.model_name)
+        index_cpu = faiss.read_index(index_path)
+        print(f"Total vectors in index: {index_cpu.ntotal}")
 
-            if faiss.get_num_gpus() > 0 and self.use_gpu and index_cpu.ntotal < 2048:
-                print("\033[92m Using GPU for FAISS search")
-                res = faiss.StandardGpuResources()
-                self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
-            else:
-                print(f"\033[93m Overriding to CPU for FAISS search for feature vectors {index_cpu.ntotal}")
-                self.index = index_cpu
-        
+        if faiss.get_num_gpus() > 0 and self.use_gpu and index_cpu.ntotal < 2048:
+            print("\033[92m Using GPU for FAISS search")
+            res = faiss.StandardGpuResources()
+            self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+        else:
+            print(f"\033[93m Overriding to CPU for FAISS search for feature vectors {index_cpu.ntotal}")
+            self.index = index_cpu
+    
         
         # Step 4: Perform batch FAISS search for each image in bulk_features
         # to find if highest matching image is below threshold
@@ -608,19 +607,18 @@ class Search_Setup:
         # Step 3: Ensure GPU index is loaded
         # Limit the number of images to search in the index for GPU to 2048 if higher use CPU
         
-        if not hasattr(self, 'index') or self.index is None:
-            print("Loading FAISS index...")
-            index_path = config.image_features_vectors_idx(self.model_name)
-            index_cpu = faiss.read_index(index_path)
-            print(f"Total vectors in index: {index_cpu.ntotal}")
+        print("Loading FAISS index...")
+        index_path = config.image_features_vectors_idx(self.model_name)
+        index_cpu = faiss.read_index(index_path)
+        print(f"Total vectors in index: {index_cpu.ntotal}")
 
-            if faiss.get_num_gpus() > 0 and self.use_gpu and index_cpu.ntotal < 2048:
-                print("\033[92m Using GPU for FAISS search")
-                res = faiss.StandardGpuResources()
-                self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
-            else:
-                print(f"\033[93m Overriding to CPU for FAISS search for feature vectors {index_cpu.ntotal}")
-                self.index = index_cpu
+        if faiss.get_num_gpus() > 0 and self.use_gpu and index_cpu.ntotal < 2048:
+            print("\033[92m Using GPU for FAISS search")
+            res = faiss.StandardGpuResources()
+            self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
+        else:
+            print(f"\033[93m Overriding to CPU for FAISS search for feature vectors {index_cpu.ntotal}")
+            self.index = index_cpu
 
         results = []
         max_samples_to_print = 10
