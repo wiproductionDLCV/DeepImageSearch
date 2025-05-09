@@ -80,7 +80,7 @@ class Search_Setup:
         self.use_gpu = use_gpu
         self.image_batch_size = 1000
         self.batch_size = 32
-
+        
         if self.use_gpu : 
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             
@@ -452,17 +452,20 @@ class Search_Setup:
         self._clear_gpu_cache()
 
         # Step 3: Load the FAISS index CPU / GPU 
+        # Limit the number of images to search in the index for GPU to 2048 if higher use CPU
+
         if not hasattr(self, 'index') or self.index is None:
             print("Loading FAISS index...")
             index_path = config.image_features_vectors_idx(self.model_name)
             index_cpu = faiss.read_index(index_path)
+            print(f"Total vectors in index: {index_cpu.ntotal}")
 
-            if faiss.get_num_gpus() > 0 and self.use_gpu:
+            if faiss.get_num_gpus() > 0 and self.use_gpu and index_cpu.ntotal < 2048:
                 print("\033[92m Using GPU for FAISS search")
                 res = faiss.StandardGpuResources()
                 self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
             else:
-                print("\033[93m Using CPU for FAISS search")
+                print(f"\033[93m Overriding to CPU for FAISS search for feature vectors {index_cpu.ntotal}")
                 self.index = index_cpu
         
         
@@ -603,17 +606,20 @@ class Search_Setup:
         self._clear_gpu_cache()
         
         # Step 3: Ensure GPU index is loaded
+        # Limit the number of images to search in the index for GPU to 2048 if higher use CPU
+        
         if not hasattr(self, 'index') or self.index is None:
             print("Loading FAISS index...")
             index_path = config.image_features_vectors_idx(self.model_name)
             index_cpu = faiss.read_index(index_path)
+            print(f"Total vectors in index: {index_cpu.ntotal}")
 
-            if faiss.get_num_gpus() > 0 and self.use_gpu:
+            if faiss.get_num_gpus() > 0 and self.use_gpu and index_cpu.ntotal < 2048:
                 print("\033[92m Using GPU for FAISS search")
                 res = faiss.StandardGpuResources()
                 self.index = faiss.index_cpu_to_gpu(res, 0, index_cpu)
             else:
-                print("\033[93m Using CPU for FAISS search")
+                print(f"\033[93m Overriding to CPU for FAISS search for feature vectors {index_cpu.ntotal}")
                 self.index = index_cpu
 
         results = []
