@@ -15,9 +15,9 @@ from DeepImageSearch import Load_Data,Search_Setup
 
 
 # Load images from a folder
-image_list = Load_Data().from_folder(['/home/wi/work/Dataset_animals/crops'])
-unannotated_image_folder = '/home/wi/work/Dataset_animals/crop_nonannoted'
-output_csv = '/home/wi/work/annotation_transfer_tool_gpu/result_sequential3.csv'
+image_list = Load_Data().from_folder(['/home/wi/work/dataset_crops/crops-correct'])
+unannotated_image_folder = '/home/wi/work/dataset_crops/crops-incorrect'
+output_csv = '/home/wi/work/dataset_crops/result_sequential3.csv'
 threshold = 0.2
 # Set up the search engine
 st = Search_Setup(image_list=image_list, model_name='vgg19', pretrained=True,use_gpu=True,use_batch_processing=True)
