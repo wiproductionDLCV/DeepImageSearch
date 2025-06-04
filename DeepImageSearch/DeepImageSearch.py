@@ -17,6 +17,8 @@ import gc
 import time
 import csv
 import matplotlib.pyplot as plt
+import pickle 
+
 
 class Load_Data:
     """A class for loading data from single/multiple folders or a CSV file"""
@@ -148,7 +150,21 @@ class Search_Setup:
         
         return feature / np.linalg.norm(feature)
     
-    
+    def get_correct_images_list(self, pkl_path):
+        try:
+            with open(pkl_path, 'rb') as f:
+                df = pickle.load(f)
+
+            if isinstance(df, pd.DataFrame) and 'images_paths' in df.columns:
+                image_names = [os.path.basename(path) for path in df['images_paths']]
+                return image_names
+            else:
+                print("❌ Pickle file does not contain a valid DataFrame with 'images_paths' column.")
+                return []
+        except Exception as e:
+            print(f"⚠️ Error reading pkl file: {e}")
+            return []
+        
 
     def _extract_batch(self, img_list, batch_size=32):
         """
@@ -381,41 +397,71 @@ class Search_Setup:
 
     def add_images_to_index(self, new_image_paths: list):
         """
-        Adds new images to the existing index.
-
-        Parameters:
-        -----------
-        new_image_paths : list
-            A list of paths to the new images to be added to the index.
+        Adds new images to the index, skipping any images already present in the existing metadata.
+        Re-creates FAISS index and metadata.
         """
-        # Load existing metadata and index
+        print(f"\033[94m Attempting to add {len(new_image_paths)} new images to the index...")
+
+        # Load existing metadata
         self.image_data = pd.read_pickle(config.image_data_with_features_pkl(self.model_name))
-        index = faiss.read_index(config.image_features_vectors_idx(self.model_name))
+        existing_paths = set(self.image_data['images_paths'].tolist())
+        existing_features = self.image_data['features'].tolist()
 
-        for new_image_path in tqdm(new_image_paths):
-            # Extract features from the new image
-            try:
-                img = Image.open(new_image_path)
-                feature = self._extract(img)
-            except Exception as e:
-                print(f"\033[91m Error extracting features from the new image: {e}")
-                continue
+        print(f"[DEBUG] Loaded existing metadata entries: {len(existing_paths)}")
 
-            # Add the new image to the metadata
-            new_metadata = pd.DataFrame({"images_paths": [new_image_path], "features": [feature]})
-            #self.image_data = self.image_data.append(new_metadata, ignore_index=True)
-            self.image_data  =pd.concat([self.image_data, new_metadata], axis=0, ignore_index=True)
+        # Filter out already indexed image paths
+        unique_new_paths = [p for p in new_image_paths if p not in existing_paths]
 
-            # Add the new image to the index
-            index.add(np.array([feature], dtype=np.float32))
+        if not unique_new_paths:
+            print("\033[93m[INFO] No new images to add. All provided images are already indexed.")
+            return
 
-        # Save the updated metadata and index
-        self.image_data.to_pickle(config.image_data_with_features_pkl(self.model_name))
+        print(f"\033[92m[INFO] {len(unique_new_paths)} new unique images to process.")
+
+        # Extract features for new images
+        print("[INFO] Extracting features for new images...")
+        if self.use_batch_processing:
+            if self.use_gpu:
+                new_features = self._get_feature_batch(unique_new_paths, self.image_batch_size, self.batch_size)
+            else:
+                new_features = self._get_feature_batch(unique_new_paths, self.image_batch_size, 1)
+        else:
+            new_features = self._get_feature(unique_new_paths)
+
+        print(f"[DEBUG] Extracted {len(new_features)} new feature vectors")
+
+        # Final combined lists
+        all_image_paths = self.image_data['images_paths'].tolist() + unique_new_paths
+        all_features = existing_features + [np.array(f) for f in new_features]
+
+        if len(all_image_paths) != len(all_features):
+            raise ValueError("[ERROR] Mismatch between image paths and feature vectors.")
+
+        # Save updated metadata
+        updated_df = pd.DataFrame({
+            'images_paths': all_image_paths,
+            'features': all_features
+        })
+        updated_df.to_pickle(config.image_data_with_features_pkl(self.model_name))
+        print(f"[INFO] Updated image metadata saved. Total entries: {len(updated_df)}")
+
+        # Recreate FAISS index
+        feature_dim = all_features[0].shape[0]
+        index = faiss.IndexFlatL2(feature_dim)
+        features_matrix = np.vstack(all_features).astype(np.float32)
+        index.add(features_matrix)
+
         faiss.write_index(index, config.image_features_vectors_idx(self.model_name))
-        if self.use_gpu :
-            self._clear_gpu_cache()
-        print(f"\033[92m New images added to the index: {len(new_image_paths)}")
+        print(f"[INFO] FAISS index rebuilt with {index.ntotal} entries.")
 
+        # Clear GPU cache if needed
+        if self.use_gpu:
+            self._clear_gpu_cache()
+
+        print("[SUCCESS] Index update completed.")
+
+
+        
     def _search_by_vector(self, v, n: int):
         self.v = v
         self.n = n
@@ -607,6 +653,10 @@ class Search_Setup:
         
         # Step 3: Ensure GPU index is loaded
         # Limit the number of images to search in the index for GPU to 2048 if higher use CPU
+        
+        print("Loading Correct Image List...")
+        image_pkl_path = config.image_data_with_features_pkl(self.model_name)
+        self.image_list = self.get_correct_images_list(image_pkl_path)
         
         print("Loading FAISS index...")
         index_path = config.image_features_vectors_idx(self.model_name)
